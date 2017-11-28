@@ -17,6 +17,13 @@ else:
     print('Default GPU Device: {}'.format(tf.test.gpu_device_name()))
 
 
+# This is required to avoid the errors caused in training:
+#TypeError: Cannot interpret feed_dict key as Tensor: Can not convert a float into a Tensor.
+correct_label = tf.placeholder(tf.float32)
+learning_rate = tf.placeholder(tf.float32)
+keep_prob = tf.placeholder(tf.float32)
+
+
 def load_vgg(sess, vgg_path):
     """
     Load Pretrained VGG Model into TensorFlow.
@@ -32,8 +39,16 @@ def load_vgg(sess, vgg_path):
     vgg_layer3_out_tensor_name = 'layer3_out:0'
     vgg_layer4_out_tensor_name = 'layer4_out:0'
     vgg_layer7_out_tensor_name = 'layer7_out:0'
+    tf.saved_model.loader.load(sess,[vgg_tag],vgg_path)
+    graph = tf. get_default_graph()
+    input_img = graph.get_tensor_by_name(vgg_input_tensor_name)
+    keep_prob = graph.get_tensor_by_name(vgg_keep_prob_tensor_name)
+    layer3 = graph.get_tensor_by_name(vgg_layer3_out_tensor_name)
+    layer4 = graph.get_tensor_by_name(vgg_layer4_out_tensor_name)
+    layer7 = graph.get_tensor_by_name(vgg_layer7_out_tensor_name)
     
-    return None, None, None, None, None
+    return input_img, keep_prob, layer3, layer4, layer7
+
 tests.test_load_vgg(load_vgg, tf)
 
 
@@ -47,7 +62,39 @@ def layers(vgg_layer3_out, vgg_layer4_out, vgg_layer7_out, num_classes):
     :return: The Tensor for the last layer of output
     """
     # TODO: Implement function
-    return None
+    # Ref, thread on forums here: https://discussions.udacity.com/t/what-is-the-output-layer-of-the-pre-trained-vgg16-to-be-fed-to-layers-project/327033
+    # Ref, for using kernel_initializer: https://discussions.udacity.com/t/poor-predictions/364899/2
+	
+    # Implement 1x1 convolution.
+
+    # Start taking the input as the last layer of pre trained vgg model.
+    conv_7_1_1 = tf.layers.conv2d(vgg_layer7_out, num_classes, 1, padding='same', kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3),kernel_initializer=tf.truncated_normal_initializer(stddev=0.01))
+    
+    # Repeat for layer 3 and 4.
+    conv_4_1_1 = tf.layers.conv2d(vgg_layer4_out,num_classes, 1, padding='same', kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3),kernel_initializer=tf.truncated_normal_initializer(stddev=0.01))
+    conv_3_1_1 = tf.layers.conv2d(vgg_layer3_out,num_classes,1,padding='same',kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3),kernel_initializer=tf.truncated_normal_initializer(stddev=0.01))
+
+
+    # Implement Decoder
+    # Upsample 1x1 convolution input by 2.	
+    output = tf.layers.conv2d_transpose(conv_7_1_1 ,num_classes,4,strides=(2, 2),padding='same',kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3),kernel_initializer=tf.truncated_normal_initializer(stddev=0.01))
+
+    
+    # Skip connections.
+    output = tf.add(conv_4_1_1, output)
+    
+    # Upsample 1x1 convolution input by 2.	
+    output = tf.layers.conv2d_transpose(output, num_classes, 4, strides=(2, 2),padding='same',kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3),kernel_initializer=tf.truncated_normal_initializer(stddev=0.01))
+    
+    # Skip connecttions.
+    output = tf.add(conv_3_1_1, output)
+
+    # Upsample 1x1 convolution input by 8.	
+    Output = tf.layers.conv2d_transpose(output, num_classes, 16, strides=(8, 8),padding='same',kernel_regularizer=tf.contrib.layers.l2_regularizer(1e-3),kernel_initializer=tf.truncated_normal_initializer(stddev=0.01))
+  
+    return Output
+
+    
 tests.test_layers(layers)
 
 
@@ -61,7 +108,20 @@ def optimize(nn_last_layer, correct_label, learning_rate, num_classes):
     :return: Tuple of (logits, train_op, cross_entropy_loss)
     """
     # TODO: Implement function
-    return None, None, None
+    
+    logits = tf.reshape(nn_last_layer, (-1, num_classes))
+    correct_label = tf.reshape(correct_label, (-1, num_classes))
+                    
+    # Ref: Traffic sign classigier project, Term 1.                
+    cross_entropy = tf.nn.softmax_cross_entropy_with_logits(logits=logits, labels = correct_label)
+    cross_entropy_loss = tf.reduce_mean(cross_entropy)
+    
+    optimizer = tf.train.AdamOptimizer(learning_rate = 0.0001 )
+    
+    training_operation = optimizer.minimize(cross_entropy_loss)
+    
+    return logits, training_operation, cross_entropy_loss
+
 tests.test_optimize(optimize)
 
 
@@ -81,7 +141,21 @@ def train_nn(sess, epochs, batch_size, get_batches_fn, train_op, cross_entropy_l
     :param learning_rate: TF Placeholder for learning rate
     """
     # TODO: Implement function
+
+    print (input_image,type(input_image))
+    print (correct_label,type(correct_label))
+
+    # Ref: https://discussions.udacity.com/t/weird-behavior-and-typeerror-cannot-interpret-feed-dict-key-as-tensor/349893/4
+    sess.run(tf.global_variables_initializer())
+
+    for epoch in range(epochs):
+    	for image, label in get_batches_fn(batch_size):
+    	    _,training_loss = sess.run([train_op, cross_entropy_loss],feed_dict={input_image:image, correct_label:label,keep_prob: 0.5 , learning_rate: 0.0001})
+    	  
+    	print("Epoch ", epoch, " Loss " , training_loss)
+		
     pass
+    
 tests.test_train_nn(train_nn)
 
 
@@ -90,7 +164,10 @@ def run():
     image_shape = (160, 576)
     data_dir = './data'
     runs_dir = './runs'
+    epochs = 20
+    batch_size=16
     tests.test_for_kitti_dataset(data_dir)
+
 
     # Download pretrained vgg model
     helper.maybe_download_pretrained_vgg(data_dir)
@@ -109,14 +186,19 @@ def run():
         #  https://datascience.stackexchange.com/questions/5224/how-to-prepare-augment-images-for-neural-network
 
         # TODO: Build NN using load_vgg, layers, and optimize function
+        input_image, keep_prob, layer3, layer4, layer7 = load_vgg(sess, vgg_path)
+        output = layers(layer3, layer4, layer7, num_classes)
+        logits, training_operation, cross_entropy_loss = optimize(output, correct_label, learning_rate , num_classes=num_classes)
 
         # TODO: Train NN using the train_nn function
-
+        train_nn(sess, epochs , batch_size, get_batches_fn, training_operation, cross_entropy_loss, input_image, correct_label, keep_prob, learning_rate )
+        
         # TODO: Save inference data using helper.save_inference_samples
-        #  helper.save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, keep_prob, input_image)
+        helper.save_inference_samples(runs_dir, data_dir, sess, image_shape, logits, keep_prob, input_image)
 
         # OPTIONAL: Apply the trained model to a video
 
 
 if __name__ == '__main__':
     run()
+
